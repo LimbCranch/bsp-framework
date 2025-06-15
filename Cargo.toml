@@ -1,0 +1,5 @@
+﻿[workspace]
+members = [
+    "crates/bsp-acquisition",
+    "crates/bsp-core",
+]

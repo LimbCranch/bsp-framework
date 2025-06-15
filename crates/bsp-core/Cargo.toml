@@ -1,0 +1,66 @@
+[package]
+name = "bsp-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["BSP Framework Team"]
+description = "High-performance biosignal processing framework with real-time capabilities"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bsp-framework/bsp-framework"
+keywords = ["biosignal", "real-time", "embedded", "medical", "signal-processing"]
+categories = ["embedded", "science", "no-std"]
+
+[features]
+default = ["std"]
+std = [
+    "serde/std",
+    "uuid/std",
+    "heapless/serde",
+    "tinyvec/std",
+    "chrono/std"
+]
+serde-support = ["serde", "heapless/serde", "tinyvec/serde"]
+crypto = ["sha2", "ed25519-dalek"]
+json = ["serde_json"]
+
+[dependencies]
+# Core no_std dependencies
+heapless = { version = "0.8", default-features = false }
+tinyvec = { version = "1.6", default-features = false, features = ["alloc"] }
+arrayvec = { version = "0.7", default-features = false }
+num-complex = { version = "0.4", default-features = false }
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# UUID support
+uuid = { version = "1.6", default-features = false, features = ["v4", "fast-rng"] }
+
+# Time handling
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Serialization (optional)
+serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
+serde_json = { version = "1.0", default-features = false, optional = true }
+
+# Cryptography (optional)
+sha2 = { version = "0.10", default-features = false, optional = true }
+ed25519-dalek = { version = "2.0", default-features = false, optional = true }
+
+# Math and utilities
+libm = "0.2"
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1.4"
+static_assertions = "1.1"
+
+#[[bench]]
+#name = "signal_entity_benchmarks"
+#harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = "z"
+debug = false
