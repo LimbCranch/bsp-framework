@@ -1,0 +1,23 @@
+[package]
+name = "bsp-processing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bsp-core = { path = "../bsp-core" }
+serde = { workspace = true }
+anyhow = { workspace = true }
+
+# Signal processing dependencies
+num-complex = "0.4"
+rustfft = "6.0"
+realfft = "3.0"
+
+# Math utilities
+libm = "0.2"
+num-traits = "0.2"
+serde_json = "1.0.140"
+
+[features]
+default = []
+simd = []  # Future SIMD optimizations
