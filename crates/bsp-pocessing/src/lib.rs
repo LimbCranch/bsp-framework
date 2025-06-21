@@ -8,7 +8,7 @@ pub mod features;
 pub mod processor;
 pub mod config;
 
-pub use pipeline::{Pipeline, PipelineBuilder, ProcessingChain};
+pub use pipeline::*;
 pub use processor::{SignalProcessor, ProcessorConfig, ProcessingResult};
 pub use filters::{
     FilterType, ButterworthFilter, NotchFilter, MovingAverageFilter,

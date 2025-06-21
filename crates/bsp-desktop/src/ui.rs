@@ -1,10 +1,11 @@
-﻿//! UI components and state management
+﻿//! UI components and state management with processing integration
 
 use bsp_core::{SignalEntity, MuscleGroup};
 use bsp_simulation::SignalPattern;
+use crate::processing_service::{PipelineType, ProcessingPipelineConfig};
 use egui_plot::{Line, Plot, PlotPoints, Legend, Corner};
 use std::collections::VecDeque;
-use crate::app::BSPApp;
+use crate::app::{BSPApp, PlotMode};
 
 /// UI state management
 #[derive(Debug)]
@@ -14,6 +15,7 @@ pub struct UIState {
     pub show_stats: bool,
     pub show_plot: bool,
     pub show_settings: bool,
+    pub show_processing: bool,
 
     // Control values
     pub activation_level: f32,
@@ -29,6 +31,7 @@ pub struct UIState {
     pub plot_y_range: [f32; 2],
     pub show_multiple_channels: bool,
     pub selected_channel: usize,
+    pub plot_mode: PlotMode,
 }
 
 impl UIState {
@@ -38,6 +41,7 @@ impl UIState {
             show_stats: true,
             show_plot: true,
             show_settings: false,
+            show_processing: true,
 
             activation_level: 0.4,
             selected_muscle: MuscleGroup::Biceps,
@@ -55,6 +59,7 @@ impl UIState {
             plot_y_range: [-2.0, 2.0],
             show_multiple_channels: true,
             selected_channel: 0,
+            plot_mode: PlotMode::Processed,
         }
     }
 }
@@ -119,8 +124,6 @@ impl PlotData {
 
     /// Show the EMG plot
     pub fn show_plot(&self, ui: &mut egui::Ui, ui_state: &UIState) {
-        ui.heading("EMG Signal Visualization");
-
         // Plot controls
         ui.horizontal(|ui| {
             ui.label("Window:");
@@ -136,6 +139,9 @@ impl PlotData {
                 ui.label(format!("Range: [{:.1}, {:.1}]mV",
                                  ui_state.plot_y_range[0], ui_state.plot_y_range[1]));
             }
+
+            ui.separator();
+            ui.label(format!("Data points: {}", self.time_series.len()));
         });
 
         // Create the plot
@@ -204,13 +210,11 @@ impl PlotData {
         if !self.time_series.is_empty() {
             ui.separator();
             ui.horizontal(|ui| {
-                ui.label(format!("Data points: {}", self.time_series.len()));
-                ui.separator();
                 ui.label(format!("Duration: {:.1}s", self.current_time));
 
                 if let Some((_, latest_channels)) = self.time_series.back() {
                     ui.separator();
-                    ui.label(format!("Latest values:"));
+                    ui.label("Latest values:");
                     for (i, &value) in latest_channels.iter().enumerate() {
                         ui.label(format!("CH{}: {:.3}mV", i + 1, value));
                     }
@@ -225,7 +229,7 @@ pub struct ControlPanel;
 
 impl ControlPanel {
     pub fn show(ui: &mut egui::Ui, app: &mut BSPApp) {
-        ui.heading("EMG Simulation Controls");
+        ui.heading("BSP-Framework Controls");
         ui.separator();
 
         // Playback controls
@@ -247,6 +251,53 @@ impl ControlPanel {
 
                 if ui.button("▶ Resume").clicked() {
                     app.resume_stream();
+                }
+            });
+        });
+
+        ui.separator();
+
+        // Processing controls
+        ui.group(|ui| {
+            ui.label("Signal Processing");
+
+            ui.horizontal(|ui| {
+                ui.label("Pipeline:");
+                egui::ComboBox::from_id_source("pipeline_combo")
+                    .selected_text(format!("{:?}", app.processing_config.pipeline_type))
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_value(&mut app.processing_config.pipeline_type, PipelineType::Bypass, "Bypass").clicked() {
+                            app.set_pipeline_type(PipelineType::Bypass);
+                        }
+                        if ui.selectable_value(&mut app.processing_config.pipeline_type, PipelineType::RealTime, "Real-time").clicked() {
+                            app.set_pipeline_type(PipelineType::RealTime);
+                        }
+                        if ui.selectable_value(&mut app.processing_config.pipeline_type, PipelineType::Standard, "Standard").clicked() {
+                            app.set_pipeline_type(PipelineType::Standard);
+                        }
+                        if ui.selectable_value(&mut app.processing_config.pipeline_type, PipelineType::Research, "Research").clicked() {
+                            app.set_pipeline_type(PipelineType::Research);
+                        }
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut app.processing_config.enable_filters, "Enable Filters").changed() {
+                    app.update_processing_config(app.processing_config.clone());
+                }
+
+                if ui.checkbox(&mut app.processing_config.enable_features, "Enable Features").changed() {
+                    app.update_processing_config(app.processing_config.clone());
+                }
+            });
+
+            ui.horizontal(|ui| {
+                if ui.button("Reset Pipeline").clicked() {
+                    app.reset_processing();
+                }
+
+                if ui.button("Bypass Mode").clicked() {
+                    app.set_processing_bypass(true);
                 }
             });
         });
@@ -337,6 +388,63 @@ impl ControlPanel {
 
         ui.separator();
 
+        // Processing parameters (expanded when filters enabled)
+        if app.processing_config.enable_filters {
+            ui.group(|ui| {
+                ui.label("Filter Parameters");
+
+                ui.horizontal(|ui| {
+                    ui.label("Highpass:");
+                    if ui.add(egui::Slider::new(&mut app.processing_config.highpass_cutoff, 1.0..=100.0)
+                        .suffix("Hz")).changed() {
+                        app.update_processing_config(app.processing_config.clone());
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Lowpass:");
+                    if ui.add(egui::Slider::new(&mut app.processing_config.lowpass_cutoff, 100.0..=1000.0)
+                        .suffix("Hz")).changed() {
+                        app.update_processing_config(app.processing_config.clone());
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Notch:");
+                    if ui.add(egui::Slider::new(&mut app.processing_config.notch_frequency, 45.0..=65.0)
+                        .suffix("Hz")).changed() {
+                        app.update_processing_config(app.processing_config.clone());
+                    }
+                });
+            });
+
+            ui.separator();
+        }
+
+        // Feature extraction parameters (when features enabled)
+        if app.processing_config.enable_features {
+            ui.group(|ui| {
+                ui.label("Feature Extraction");
+
+                ui.horizontal(|ui| {
+                    ui.label("Window Size:");
+                    if ui.add(egui::Slider::new(&mut app.processing_config.feature_window_size, 64..=1024)).changed() {
+                        app.update_processing_config(app.processing_config.clone());
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Overlap:");
+                    if ui.add(egui::Slider::new(&mut app.processing_config.feature_overlap, 0.0..=0.9)
+                        .text("%")).changed() {
+                        app.update_processing_config(app.processing_config.clone());
+                    }
+                });
+            });
+
+            ui.separator();
+        }
+
         // Sampling rate control
         ui.group(|ui| {
             ui.label("Signal Parameters");
@@ -356,6 +464,17 @@ impl ControlPanel {
         // Plot controls
         ui.group(|ui| {
             ui.label("Plot Settings");
+
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                egui::ComboBox::from_id_source("plot_mode_combo")
+                    .selected_text(format!("{:?}", app.ui_state.plot_mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut app.ui_state.plot_mode, PlotMode::Raw, "Raw Signal");
+                        ui.selectable_value(&mut app.ui_state.plot_mode, PlotMode::Processed, "Processed Signal");
+                        ui.selectable_value(&mut app.ui_state.plot_mode, PlotMode::Comparison, "Comparison");
+                    });
+            });
 
             ui.horizontal(|ui| {
                 ui.label("Window:");
@@ -379,12 +498,18 @@ impl ControlPanel {
         // Help section
         ui.separator();
         ui.collapsing("Help", |ui| {
+            ui.label("Signal Processing Pipeline:");
+            ui.label("• Bypass: No processing, raw signal passthrough");
+            ui.label("• Real-time: Minimal latency filtering for live display");
+            ui.label("• Standard: Balanced filtering and optional features");
+            ui.label("• Research: High-quality processing with all features");
+            ui.separator();
             ui.label("Controls:");
             ui.label("• Use Start/Stop to control signal generation");
-            ui.label("• Select different muscle groups to see varying patterns");
-            ui.label("• Adjust activation level for different signal amplitudes");
-            ui.label("• Choose signal patterns for realistic EMG simulation");
-            ui.label("• Modify sampling rate to see effect on signal quality");
+            ui.label("• Select different muscle groups and patterns");
+            ui.label("• Adjust activation level for different amplitudes");
+            ui.label("• Enable/disable filters and features as needed");
+            ui.label("• Switch plot modes to compare raw vs processed");
         });
     }
 }
