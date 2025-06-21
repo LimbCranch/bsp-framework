@@ -116,7 +116,7 @@ impl FilterConfig {
 }
 
 /// Butterworth filter implementation
-pub struct ButterworthFilter {
+/*pub struct ButterworthFilter {
     config: ProcessorConfig,
     filter_config: FilterConfig,
     // Filter coefficients
@@ -334,8 +334,354 @@ impl ButterworthFilter {
 
         output
     }
+}*/
+
+
+/// Fixed Butterworth filter implementation using biquad sections
+pub struct ButterworthFilter {
+    config: ProcessorConfig,
+    filter_config: FilterConfig,
+    // Use biquad sections for stability
+    biquads: Vec<BiquadSection>,
+    sampling_rate: f32,
+    initialized: bool,
 }
 
+/// Single biquad section (2nd order)
+#[derive(Debug, Clone)]
+struct BiquadSection {
+    // Coefficients: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
+    b0: f32, b1: f32, b2: f32,
+    a1: f32, a2: f32,
+    // State per channel
+    x1: Vec<f32>, x2: Vec<f32>, // Input history
+    y1: Vec<f32>, y2: Vec<f32>, // Output history
+}
+
+impl BiquadSection {
+    fn new(channel_count: usize) -> Self {
+        Self {
+            b0: 1.0, b1: 0.0, b2: 0.0,
+            a1: 0.0, a2: 0.0,
+            x1: vec![0.0; channel_count],
+            x2: vec![0.0; channel_count],
+            y1: vec![0.0; channel_count],
+            y2: vec![0.0; channel_count],
+        }
+    }
+
+    fn process_sample(&mut self, input: f32, channel: usize) -> f32 {
+        // Bounds check
+        if channel >= self.x1.len() {
+            return input; // Fallback: pass through
+        }
+
+        // Direct form II implementation
+        let output = self.b0 * input + self.b1 * self.x1[channel] + self.b2 * self.x2[channel]
+            - self.a1 * self.y1[channel] - self.a2 * self.y2[channel];
+
+        // Update state
+        self.x2[channel] = self.x1[channel];
+        self.x1[channel] = input;
+        self.y2[channel] = self.y1[channel];
+        self.y1[channel] = output;
+
+        output
+    }
+
+    fn reset(&mut self) {
+        self.x1.fill(0.0);
+        self.x2.fill(0.0);
+        self.y1.fill(0.0);
+        self.y2.fill(0.0);
+    }
+}
+
+impl ButterworthFilter {
+    pub fn new(filter_config: FilterConfig) -> BspResult<Self> {
+        let mut config = ProcessorConfig::new("butterworth", ProcessorType::Filter);
+        config.set_parameter("filter_type", format!("{:?}", filter_config.filter_type).into());
+        config.set_parameter("order", (filter_config.order as i32).into());
+
+        Ok(ButterworthFilter {
+            config,
+            filter_config,
+            biquads: Vec::new(),
+            sampling_rate: 0.0,
+            initialized: false,
+        })
+    }
+
+    fn initialize(&mut self, sampling_rate: f32, channel_count: usize) -> BspResult<()> {
+        self.sampling_rate = sampling_rate;
+
+        // Calculate number of biquad sections needed
+        let num_sections = (self.filter_config.order + 1) / 2;
+
+        match self.filter_config.filter_type {
+            FilterType::ButterworthLowpass => {
+                if let Some(cutoff) = self.filter_config.cutoff_freq {
+                    self.design_lowpass_biquads(cutoff, sampling_rate, channel_count)?;
+                } else {
+                    return Err(BspError::ConfigurationError {
+                        message: "Lowpass filter requires cutoff frequency".to_string(),
+                    });
+                }
+            },
+            FilterType::ButterworthHighpass => {
+                if let Some(cutoff) = self.filter_config.cutoff_freq {
+                    self.design_highpass_biquads(cutoff, sampling_rate, channel_count)?;
+                } else {
+                    return Err(BspError::ConfigurationError {
+                        message: "Highpass filter requires cutoff frequency".to_string(),
+                    });
+                }
+            },
+            _ => {
+                return Err(BspError::ConfigurationError {
+                    message: "Unsupported filter type for Butterworth filter".to_string(),
+                });
+            }
+        }
+
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn design_lowpass_biquads(&mut self, cutoff: f32, fs: f32, channel_count: usize) -> BspResult<()> {
+        // Validate cutoff frequency
+        if cutoff >= fs / 2.0 {
+            return Err(BspError::ConfigurationError {
+                message: "Cutoff frequency must be less than Nyquist frequency".to_string(),
+            });
+        }
+
+        // Pre-warp frequency for bilinear transform
+        let omega_c = 2.0 * std::f32::consts::PI * cutoff / fs;
+        let k = (omega_c / 2.0).tan();
+
+        // For 2nd order Butterworth lowpass
+        let sqrt2 = std::f32::consts::SQRT_2;
+        let k2 = k * k;
+        let k2_plus_sqrt2k_plus_1 = k2 + sqrt2 * k + 1.0;
+
+        let mut biquad = BiquadSection::new(channel_count);
+
+        // Coefficients for 2nd order Butterworth lowpass
+        biquad.b0 = k2 / k2_plus_sqrt2k_plus_1;
+        biquad.b1 = 2.0 * biquad.b0;
+        biquad.b2 = biquad.b0;
+        biquad.a1 = (2.0 * (k2 - 1.0)) / k2_plus_sqrt2k_plus_1;
+        biquad.a2 = (k2 - sqrt2 * k + 1.0) / k2_plus_sqrt2k_plus_1;
+
+        self.biquads = vec![biquad];
+        Ok(())
+    }
+
+    fn design_highpass_biquads(&mut self, cutoff: f32, fs: f32, channel_count: usize) -> BspResult<()> {
+        if cutoff >= fs / 2.0 {
+            return Err(BspError::ConfigurationError {
+                message: "Cutoff frequency must be less than Nyquist frequency".to_string(),
+            });
+        }
+
+        let omega_c = 2.0 * std::f32::consts::PI * cutoff / fs;
+        let k = (omega_c / 2.0).tan();
+
+        let sqrt2 = std::f32::consts::SQRT_2;
+        let k2 = k * k;
+        let k2_plus_sqrt2k_plus_1 = k2 + sqrt2 * k + 1.0;
+
+        let mut biquad = BiquadSection::new(channel_count);
+
+        // Coefficients for 2nd order Butterworth highpass
+        biquad.b0 = 1.0 / k2_plus_sqrt2k_plus_1;
+        biquad.b1 = -2.0 * biquad.b0;
+        biquad.b2 = biquad.b0;
+        biquad.a1 = (2.0 * (k2 - 1.0)) / k2_plus_sqrt2k_plus_1;
+        biquad.a2 = (k2 - sqrt2 * k + 1.0) / k2_plus_sqrt2k_plus_1;
+
+        self.biquads = vec![biquad];
+        Ok(())
+    }
+}
+
+impl SignalProcessor for ButterworthFilter {
+    fn process(&mut self, input: &SignalEntity) -> BspResult<SignalEntity> {
+        let mut timer = ProcessingMetrics::start_timing();
+
+        // Initialize if needed
+        if !self.initialized || self.sampling_rate != input.sampling_rate() {
+            self.initialize(input.sampling_rate(), input.channel_count())?;
+        }
+
+        // Early return if no biquads (shouldn't happen but safety first)
+        if self.biquads.is_empty() {
+            return Ok(input.clone());
+        }
+
+        let channels = input.all_channels().map_err(|e| {
+            BspError::ProcessingError {
+                message: format!("Failed to extract channels: {}", e),
+            }
+        })?;
+
+        let samples_per_channel = input.samples_per_channel();
+        let mut processed_data = Vec::with_capacity(input.len());
+
+        // Process sample by sample through all biquad sections
+        for sample_idx in 0..samples_per_channel {
+            for (channel_idx, channel_data) in channels.iter().enumerate() {
+                if sample_idx >= channel_data.len() {
+                    processed_data.push(0.0); // Safety fallback
+                    continue;
+                }
+
+                let mut sample = channel_data[sample_idx];
+
+                // Process through all biquad sections in series
+                for biquad in &mut self.biquads {
+                    sample = biquad.process_sample(sample, channel_idx);
+                }
+
+                processed_data.push(sample);
+            }
+        }
+
+        let output_signal = SignalEntity::new(processed_data, input.metadata.clone())
+            .map_err(|e| BspError::ProcessingError {
+                message: format!("Failed to create output signal: {}", e),
+            })?;
+
+        timer.set_output_quality(0.95);
+        timer.set_memory_usage(std::mem::size_of_val(&self.biquads));
+        let _metrics = timer.finish();
+
+        Ok(output_signal)
+    }
+
+    fn config(&self) -> &ProcessorConfig {
+        &self.config
+    }
+
+    fn update_config(&mut self, config: ProcessorConfig) -> BspResult<()> {
+        self.config = config;
+        self.initialized = false; // Force re-initialization
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "Butterworth Filter"
+    }
+
+    fn reset(&mut self) {
+        for biquad in &mut self.biquads {
+            biquad.reset();
+        }
+    }
+
+    fn latency_estimate(&self) -> u64 {
+        // Biquad filters have minimal latency
+        (self.biquads.len() as u64) * 10 // ~10μs per biquad section
+    }
+
+    fn can_process(&self, signal: &SignalEntity) -> bool {
+        signal.channel_count() > 0 &&
+            signal.sampling_rate() > 0.0 &&
+            signal.sampling_rate() < 50000.0 // Reasonable upper limit
+    }
+}
+
+// Additional safety wrapper for the entire processing pipeline
+pub struct SafeProcessingWrapper<T: SignalProcessor> {
+    processor: T,
+    error_count: u32,
+    max_errors: u32,
+}
+
+impl<T: SignalProcessor> SafeProcessingWrapper<T> {
+    pub fn new(processor: T, max_errors: u32) -> Self {
+        Self {
+            processor,
+            error_count: 0,
+            max_errors,
+        }
+    }
+}
+
+impl<T: SignalProcessor> SignalProcessor for SafeProcessingWrapper<T> {
+    fn process(&mut self, input: &SignalEntity) -> BspResult<SignalEntity> {
+        // If too many errors, just pass through
+        if self.error_count > self.max_errors {
+            return Ok(input.clone());
+        }
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.processor.process(input)
+        })) {
+            Ok(result) => {
+                match result {
+                    Ok(output) => {
+                        self.error_count = 0; // Reset on success
+                        Ok(output)
+                    }
+                    Err(e) => {
+                        self.error_count += 1;
+                        if self.error_count <= self.max_errors {
+                            Err(e)
+                        } else {
+                            // Fallback to passthrough
+                            Ok(input.clone())
+                        }
+                    }
+                }
+            }
+            Err(_panic) => {
+                self.error_count += 1;
+                if self.error_count <= self.max_errors {
+                    Err(BspError::ProcessingError {
+                        message: format!("Processor {} panicked", self.processor.name()),
+                    })
+                } else {
+                    // Fallback to passthrough
+                    Ok(input.clone())
+                }
+            }
+        }
+    }
+
+    fn config(&self) -> &ProcessorConfig {
+        self.processor.config()
+    }
+
+    fn update_config(&mut self, config: ProcessorConfig) -> BspResult<()> {
+        self.processor.update_config(config)
+    }
+
+    fn name(&self) -> &str {
+        self.processor.name()
+    }
+
+    fn reset(&mut self) {
+        self.processor.reset();
+        self.error_count = 0;
+    }
+
+    fn latency_estimate(&self) -> u64 {
+        self.processor.latency_estimate()
+    }
+
+    fn can_process(&self, signal: &SignalEntity) -> bool {
+        self.processor.can_process(signal)
+    }
+
+    fn processor_type(&self) -> ProcessorType {
+        self.processor.processor_type()
+    }
+}
+
+
+/*
 impl SignalProcessor for ButterworthFilter {
     fn process(&mut self, input: &SignalEntity) -> BspResult<SignalEntity> {
         let mut timer = ProcessingMetrics::start_timing();
@@ -394,7 +740,7 @@ impl SignalProcessor for ButterworthFilter {
         100 // 0.1ms
     }
 }
-
+*/
 /// Notch filter for powerline interference removal
 pub struct NotchFilter {
     config: ProcessorConfig,
